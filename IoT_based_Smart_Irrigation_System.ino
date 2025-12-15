@@ -1,154 +1,135 @@
 #define BLYNK_TEMPLATE_ID "TMPL3nF0tQWpX"
 #define BLYNK_TEMPLATE_NAME "Smart Plant Monitoring System"
-#include <LiquidCrystal_I2C.h>
 #define BLYNK_PRINT Serial
+
 #include <ESP8266WiFi.h>
 #include <BlynkSimpleEsp8266.h>
 #include <DHT.h>
 
-// Initialize the LCD display
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-char auth[] = "JW5Oq7BqSgLnk-jJZaEmfeI6d7OYdLJs";  // Enter your Blynk Auth token
-char ssid[] = "abcd";  // Enter your WIFI SSID
-char pass[] = "12345678";  // Enter your WIFI Password
-DHT dht(D4, DHT11);  // (DHT sensor pin, sensor type) D4 DHT11 Temperature Sensor
+// ---------------- Blynk Credentials ----------------
+char auth[] = "JW5Oq7BqSgLnk-jJZaEmfeI6d7OYdLJs";
+char ssid[] = "abcd";
+char pass[] = "12345678";
+
+// ---------------- Pin Configuration ----------------
+#define SOIL_PIN   A0
+#define PIR_PIN    D5
+#define DHT_PIN    D2     // safer pin than D4
+#define RELAY_PIN  D3     // Active LOW relay
+
+// ---------------- Sensors ----------------
+#define DHTTYPE DHT11
+DHT dht(DHT_PIN, DHTTYPE);
+
 BlynkTimer timer;
 
-// Define component pins
-#define soil A0  // A0 Soil Moisture Sensor
-#define PIR D5   // D5 PIR Motion Sensor
-int PIR_ToggleValue;
+// ---------------- Variables ----------------
+int relayState = HIGH;   // Motor OFF (Active LOW)
+int pirToggle = 0;
 
-void checkPhysicalButton();
-int relay1State = LOW;
-int pushButton1State = HIGH;
-#define RELAY_PIN_1 D3      // D3 Relay
-#define PUSH_BUTTON_1 D7    // D7 Button
-#define VPIN_BUTTON_1 V12   // Virtual pin for Blynk button control
+// ---------------- Virtual Pins ----------------
+#define VPIN_TEMP        V0
+#define VPIN_HUMIDITY    V1
+#define VPIN_SOIL        V3
+#define VPIN_PIR_LED     V5
+#define VPIN_PIR_TOGGLE  V6
 
-// Create variables for DHT11 sensor
+// ---------------- Function Prototypes ----------------
+void readSoil();
+void readDHT();
+void readPIR();
+
+// ===================== SETUP =====================
 void setup() {
   Serial.begin(9600);
-  lcd.begin();
-  lcd.backlight();
-  pinMode(PIR, INPUT);
-  pinMode(RELAY_PIN_1, OUTPUT);
-  digitalWrite(RELAY_PIN_1, LOW);
-  pinMode(PUSH_BUTTON_1, INPUT_PULLUP);
-  digitalWrite(RELAY_PIN_1, relay1State);
+  delay(2000);   // Allow sensors to stabilize
 
-  Blynk.begin(auth, ssid, pass, "blynk.cloud", 80);
+  pinMode(SOIL_PIN, INPUT);
+  pinMode(PIR_PIN, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+
+  digitalWrite(RELAY_PIN, HIGH);  // Motor OFF
+
   dht.begin();
-  lcd.setCursor(0, 0);
-  lcd.print("  Initializing  ");
-  for (int a = 5; a <= 10; a++) {
-    lcd.setCursor(a, 1);
-    lcd.print(".");
-    delay(500);
-  }
-  lcd.clear();
-  lcd.setCursor(11, 1);
-  lcd.print("W:OFF");
+  Blynk.begin(auth, ssid, pass);
 
-  // Set intervals for functions
-  timer.setInterval(100L, soilMoistureSensor);
-  timer.setInterval(100L, DHT11sensor);
-  timer.setInterval(500L, checkPhysicalButton);
+  timer.setInterval(1500L, readSoil);
+  timer.setInterval(2500L, readDHT);
+  timer.setInterval(500L, readPIR);
 }
 
-// Get DHT11 sensor values
-void DHT11sensor() {
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
+// ===================== SOIL MOISTURE =====================
+void readSoil() {
+  int raw = analogRead(SOIL_PIN);
 
-  if (isnan(h) || isnan(t)) {
-    Serial.println("Failed to read from DHT sensor!");
+  // 🔧 CALIBRATION (adjust after checking Serial Monitor)
+  int moisture = map(raw, 820, 420, 0, 100);
+  moisture = constrain(moisture, 0, 100);
+
+  Serial.print("Soil Raw: ");
+  Serial.print(raw);
+  Serial.print("  Moisture(%): ");
+  Serial.println(moisture);
+
+  Blynk.virtualWrite(VPIN_SOIL, moisture);
+
+  // ---------- AUTO MOTOR CONTROL ----------
+  if (moisture <= 30 && relayState == HIGH) {
+    relayState = LOW;   // Motor ON
+    Serial.println("Motor ON (Soil Dry)");
+  }
+  else if (moisture >= 60 && relayState == LOW) {
+    relayState = HIGH;  // Motor OFF
+    Serial.println("Motor OFF (Soil Wet)");
+  }
+
+  digitalWrite(RELAY_PIN, relayState);
+}
+
+// ===================== DHT11 =====================
+void readDHT() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Failed to read DHT sensor");
     return;
   }
-  Blynk.virtualWrite(V0, t);
-  Blynk.virtualWrite(V1, h);
 
-  lcd.setCursor(0, 0);
-  lcd.print("T:");
-  lcd.print(t);
+  Serial.print("Temp: ");
+  Serial.print(temperature);
+  Serial.print(" °C  Humidity: ");
+  Serial.println(humidity);
 
-  lcd.setCursor(8, 0);
-  lcd.print("H:");
-  lcd.print(h);
+  Blynk.virtualWrite(VPIN_TEMP, temperature);
+  Blynk.virtualWrite(VPIN_HUMIDITY, humidity);
 }
 
-// Get soil moisture values 
-void soilMoistureSensor() {
-  int value = analogRead(soil);
-  value = map(value, 0, 1024, 0, 100);
-  value = (value - 100) * -1;
+// ===================== PIR SENSOR =====================
+void readPIR() {
+  if (pirToggle != 1) {
+    Blynk.virtualWrite(VPIN_PIR_LED, 0);
+    return;
+  }
 
-  Blynk.virtualWrite(V3, value);
-  lcd.setCursor(0, 1);
-  lcd.print("S:");
-  lcd.print(value);
-  lcd.print(" ");
-}
+  int motion = digitalRead(PIR_PIN);
 
-// Get PIR sensor values
-void PIRsensor() {
-  bool value = digitalRead(PIR);
-  if (value) {
-    Blynk.logEvent("pirmotion", "WARNNG! Motion Detected!");
-    WidgetLED LED(V5);
-    LED.on();
+  if (motion == HIGH) {
+    Serial.println("Motion Detected!");
+    Blynk.virtualWrite(VPIN_PIR_LED, 255);
+    Blynk.logEvent("pirmotion", "Warning: Motion Detected!");
   } else {
-    WidgetLED LED(V5);
-    LED.off();
+    Blynk.virtualWrite(VPIN_PIR_LED, 0);
   }
 }
 
-BLYNK_WRITE(V6) {
-  PIR_ToggleValue = param.asInt();
+// ===================== PIR TOGGLE =====================
+BLYNK_WRITE(VPIN_PIR_TOGGLE) {
+  pirToggle = param.asInt();
 }
 
-BLYNK_CONNECTED() {
-  Blynk.syncVirtual(VPIN_BUTTON_1);
-}
-
-BLYNK_WRITE(VPIN_BUTTON_1) {
-  relay1State = param.asInt();
-  digitalWrite(RELAY_PIN_1, !relay1State);  // Inverted relay logic for proper ON/OFF control
-}
-
-void checkPhysicalButton() {
-  if (digitalRead(PUSH_BUTTON_1) == LOW) {
-    if (pushButton1State != LOW) {
-      relay1State = !relay1State;
-      digitalWrite(RELAY_PIN_1, !relay1State);  // Inverted logic here too
-
-      Blynk.virtualWrite(VPIN_BUTTON_1, relay1State);
-    }
-    pushButton1State = LOW;
-  } else {
-    pushButton1State = HIGH;
-  }
-}
-
+// ===================== LOOP =====================
 void loop() {
-  if (PIR_ToggleValue == 1) {
-    lcd.setCursor(5, 1);
-    lcd.print("M:ON ");
-    PIRsensor();
-  } else {
-    lcd.setCursor(5, 1);
-    lcd.print("M:OFF");
-    WidgetLED LED(V5);
-    LED.off();
-  }
-
-  if (relay1State == HIGH) {
-    lcd.setCursor(11, 1);
-    lcd.print("W:OFF");
-  } else if (relay1State == LOW) {
-    lcd.setCursor(11, 1);
-    lcd.print("W:ON ");
-  }
-
-  Blynk.run();  // Run the Blynk library
-  timer.run();  // Run the Blynk timer
+  Blynk.run();
+  timer.run();
+}
